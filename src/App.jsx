@@ -1,0 +1,433 @@
+import { useState, useRef, useCallback } from "react";
+
+const PROMPT = `You are an expert art instructor specializing in perspective theory and technical drawing with 20+ years of experience teaching artists at all levels.
+
+Analyze this artwork image across five perspective categories. Before scoring, examine the artwork holistically and infer the artist's skill level:
+
+BEGINNER signals: shaky/inconsistent line quality, no clear perspective system, basic subjects, errors suggest unfamiliarity with rules.
+INTERMEDIATE signals: clear attempt at perspective but inconsistent execution, some areas correct others breaking down, errors suggest knowing rules but losing track.
+ADVANCED signals: confident line quality, complex compositions, subtle errors, work suggests deep knowledge of rules.
+
+Calibrate your entire response tone based on inferred skill level:
+- BEGINNER: plain English, lead with what is working, simple fixes, warm and encouraging
+- INTERMEDIATE: some technical language, direct about issues, honest and constructive
+- ADVANCED: full technical vocabulary, peer-to-peer, clinical, no hand-holding
+
+Now score these five categories:
+1. HORIZON LINE CONSISTENCY - Is there a clear implied horizon? Does it stay consistent across all objects?
+2. VANISHING POINT ACCURACY - Do receding lines converge correctly? Are perspective systems applied consistently?
+3. OBJECT SCALE RELATIONSHIPS - Are objects sized correctly relative to their depth? Do figures scale appropriately?
+4. FORESHORTENING - Are angled objects/figures compressed correctly? Do ellipses follow correct rules relative to horizon?
+5. ATMOSPHERIC DEPTH - Do value shifts, edge softness, and saturation loss reinforce depth?
+
+Return ONLY a JSON object. No preamble, no markdown, no explanation outside the JSON:
+
+{
+  "overall_score": <0-100>,
+  "inferred_skill_level": "beginner" or "intermediate" or "advanced",
+  "skill_inference_reasoning": "<one sentence explaining what visual evidence led to this inference>",
+  "overall_summary": "<2-3 sentences calibrated to inferred skill level>",
+  "categories": [
+    {
+      "name": "Horizon Line Consistency",
+      "score": <0-100 or null if cannot be assessed>,
+      "observation": "<specific to THIS image>",
+      "fix": "<specific actionable correction for THIS image>"
+    },
+    {
+      "name": "Vanishing Point Accuracy",
+      "score": <0-100 or null>,
+      "observation": "<specific to THIS image>",
+      "fix": "<specific actionable correction for THIS image>"
+    },
+    {
+      "name": "Object Scale Relationships",
+      "score": <0-100 or null>,
+      "observation": "<specific to THIS image>",
+      "fix": "<specific actionable correction for THIS image>"
+    },
+    {
+      "name": "Foreshortening",
+      "score": <0-100 or null>,
+      "observation": "<specific to THIS image>",
+      "fix": "<specific actionable correction for THIS image>"
+    },
+    {
+      "name": "Atmospheric Depth",
+      "score": <0-100 or null>,
+      "observation": "<specific to THIS image>",
+      "fix": "<specific actionable correction for THIS image>"
+    }
+  ]
+}
+
+Critical rules:
+- Every observation and fix must reference something specific in THIS image
+- Scores should be honest and differentiated — avoid clustering everything between 70-80
+- If a category cannot be assessed, set score to null and explain in observation
+- Overall score is a weighted average with Vanishing Point Accuracy and Horizon Line Consistency weighted most heavily`;
+
+function getScoreColor(score) {
+  if (score === null) return { bg: "#FEF3C7", text: "#92400E", bar: "#F59E0B", badge: "#FDE68A" };
+  if (score >= 80) return { bg: "#D1FAE5", text: "#065F46", bar: "#10B981", badge: "#A7F3D0" };
+  if (score >= 60) return { bg: "#FEF3C7", text: "#92400E", bar: "#F59E0B", badge: "#FDE68A" };
+  return { bg: "#FEE2E2", text: "#991B1B", bar: "#EF4444", badge: "#FECACA" };
+}
+
+function getSkillColors(level) {
+  if (level === "beginner") return { bg: "#D1FAE5", text: "#065F46" };
+  if (level === "advanced") return { bg: "#DBEAFE", text: "#1E40AF" };
+  return { bg: "#FEF3C7", text: "#92400E" };
+}
+
+const LOADING_MESSAGES = [
+  "Analyzing your perspective...",
+  "Checking vanishing points...",
+  "Measuring horizon consistency...",
+  "Calibrating your score...",
+  "Assessing atmospheric depth...",
+];
+
+export default function App() {
+  const [stage, setStage] = useState("upload"); // upload | preview | loading | results
+  const [preview, setPreview] = useState(null);
+  const [base64, setBase64] = useState(null);
+  const [mediaType, setMediaType] = useState("image/jpeg");
+  const [results, setResults] = useState(null);
+  const [error, setError] = useState(null);
+  const [loadingMsg, setLoadingMsg] = useState(LOADING_MESSAGES[0]);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef(null);
+  const loadingRef = useRef(null);
+
+  const handleFile = useCallback((file) => {
+    setError(null);
+    const valid = ["image/jpeg", "image/png", "image/webp"];
+    if (!valid.includes(file.type)) {
+      setError("Please upload a JPG, PNG, or WEBP image.");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setError("Please upload an image under 5MB.");
+      return;
+    }
+    setMediaType(file.type);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setPreview(e.target.result);
+      setBase64(e.target.result.split(",")[1]);
+      setStage("preview");
+    };
+    reader.readAsDataURL(file);
+  }, []);
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  };
+
+  const analyze = async () => {
+    if (!base64) return;
+    setError(null);
+    setStage("loading");
+
+    let idx = 0;
+    setLoadingMsg(LOADING_MESSAGES[0]);
+    loadingRef.current = setInterval(() => {
+      idx = (idx + 1) % LOADING_MESSAGES.length;
+      setLoadingMsg(LOADING_MESSAGES[idx]);
+    }, 1800);
+
+    try {
+      const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+              { type: "text", text: PROMPT },
+            ],
+          }],
+        }),
+      });
+
+      clearInterval(loadingRef.current);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message || "API error");
+
+      const text = data.content.map((b) => b.text || "").join("");
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+      setResults(parsed);
+      setStage("results");
+    } catch (err) {
+      clearInterval(loadingRef.current);
+      setError("Analysis failed — please try again. " + (err.message || ""));
+      setStage("preview");
+    }
+  };
+
+  const reset = () => {
+    setStage("upload");
+    setPreview(null);
+    setBase64(null);
+    setResults(null);
+    setError(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#FAFAF8", fontFamily: "'Georgia', serif" }}>
+      <div style={{ maxWidth: 680, margin: "0 auto", padding: "3rem 1.5rem 4rem" }}>
+
+        {/* Header */}
+        <div style={{ textAlign: "center", marginBottom: "3rem" }}>
+          <div style={{
+            display: "inline-block", fontSize: 11, fontFamily: "monospace",
+            letterSpacing: "0.12em", textTransform: "uppercase",
+            color: "#9CA3AF", marginBottom: 16, padding: "4px 14px",
+            border: "0.5px solid #E5E7EB", borderRadius: 20,
+          }}>
+            A spell-checker for perspective
+          </div>
+          <h1 style={{ fontSize: 36, fontWeight: 400, color: "#111827", marginBottom: 10, letterSpacing: "-0.02em", lineHeight: 1.2 }}>
+            Perspective<br />Confidence Score
+          </h1>
+          <p style={{ fontSize: 15, color: "#6B7280", fontFamily: "system-ui, sans-serif", lineHeight: 1.6 }}>
+            Upload your drawing and get an instant AI-powered<br />perspective report card — calibrated to your skill level.
+          </p>
+        </div>
+
+        {/* Upload Stage */}
+        {stage === "upload" && (
+          <>
+            <div
+              onClick={() => fileInputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+              style={{
+                border: `1.5px dashed ${dragOver ? "#6B7280" : "#D1D5DB"}`,
+                borderRadius: 16, padding: "4rem 2rem", textAlign: "center",
+                cursor: "pointer", background: dragOver ? "#F9FAFB" : "transparent",
+                transition: "all 0.2s", marginBottom: 12,
+              }}
+            >
+              <div style={{ fontSize: 32, marginBottom: 12, opacity: 0.4 }}>⬆</div>
+              <p style={{ fontSize: 15, color: "#374151", fontFamily: "system-ui, sans-serif", marginBottom: 6 }}>
+                Drop your drawing here or click to upload
+              </p>
+              <span style={{ fontSize: 12, color: "#9CA3AF", fontFamily: "system-ui, sans-serif" }}>
+                JPG, PNG or WEBP — max 5MB
+              </span>
+            </div>
+            <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp"
+              style={{ display: "none" }} onChange={(e) => e.target.files[0] && handleFile(e.target.files[0])} />
+            {error && <ErrorMsg msg={error} />}
+          </>
+        )}
+
+        {/* Preview Stage */}
+        {stage === "preview" && (
+          <>
+            <div style={{ borderRadius: 16, overflow: "hidden", border: "0.5px solid #E5E7EB", marginBottom: 16, position: "relative" }}>
+              <img src={preview} alt="Your drawing" style={{ width: "100%", maxHeight: 380, objectFit: "contain", display: "block", background: "#F9FAFB" }} />
+              <button onClick={reset} style={{
+                position: "absolute", top: 12, right: 12, fontSize: 12,
+                fontFamily: "system-ui, sans-serif", padding: "4px 12px",
+                background: "white", border: "0.5px solid #E5E7EB",
+                borderRadius: 20, cursor: "pointer", color: "#374151",
+              }}>Change image</button>
+            </div>
+            {error && <ErrorMsg msg={error} />}
+            <button onClick={analyze} style={{
+              width: "100%", padding: "14px", fontSize: 15,
+              fontFamily: "system-ui, sans-serif", fontWeight: 500,
+              background: "#111827", color: "white", border: "none",
+              borderRadius: 12, cursor: "pointer", letterSpacing: "0.01em",
+              transition: "opacity 0.2s",
+            }}
+              onMouseOver={(e) => e.target.style.opacity = "0.85"}
+              onMouseOut={(e) => e.target.style.opacity = "1"}
+            >
+              Analyze my perspective
+            </button>
+          </>
+        )}
+
+        {/* Loading Stage */}
+        {stage === "loading" && (
+          <div style={{ textAlign: "center", padding: "5rem 1rem" }}>
+            <div style={{
+              width: 40, height: 40, border: "2px solid #E5E7EB",
+              borderTopColor: "#111827", borderRadius: "50%",
+              animation: "spin 0.8s linear infinite", margin: "0 auto 16px",
+            }} />
+            <p style={{ fontSize: 14, color: "#6B7280", fontFamily: "system-ui, sans-serif" }}>{loadingMsg}</p>
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          </div>
+        )}
+
+        {/* Results Stage */}
+        {stage === "results" && results && (
+          <Results results={results} onReset={reset} />
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+function ErrorMsg({ msg }) {
+  return (
+    <div style={{
+      background: "#FEE2E2", border: "0.5px solid #FECACA",
+      borderRadius: 10, padding: "12px 16px", fontSize: 13,
+      fontFamily: "system-ui, sans-serif", color: "#991B1B", marginBottom: 12,
+    }}>{msg}</div>
+  );
+}
+
+function Results({ results, onReset }) {
+  const overallColors = getScoreColor(results.overall_score);
+  const skillColors = getSkillColors(results.inferred_skill_level);
+  const skillLabel = results.inferred_skill_level
+    ? results.inferred_skill_level.charAt(0).toUpperCase() + results.inferred_skill_level.slice(1)
+    : "Unknown";
+
+  return (
+    <div>
+      {/* Skill badge */}
+      <div style={{ marginBottom: 8 }}>
+        <span style={{
+          display: "inline-block", fontSize: 12, fontWeight: 500,
+          fontFamily: "system-ui, sans-serif", padding: "4px 14px",
+          borderRadius: 20, background: skillColors.bg, color: skillColors.text,
+        }}>
+          {skillLabel} artist
+        </span>
+      </div>
+      <p style={{ fontSize: 12, color: "#9CA3AF", fontFamily: "system-ui, sans-serif", marginBottom: "1.5rem", lineHeight: 1.5 }}>
+        {results.skill_inference_reasoning}
+      </p>
+
+      {/* Overall score card */}
+      <div style={{
+        background: "white", border: "0.5px solid #E5E7EB",
+        borderRadius: 16, padding: "1.5rem", marginBottom: "1rem",
+        display: "flex", gap: "1.5rem", alignItems: "flex-start",
+      }}>
+        <div style={{
+          flexShrink: 0, width: 84, height: 84, borderRadius: "50%",
+          background: overallColors.bg, display: "flex",
+          flexDirection: "column", alignItems: "center", justifyContent: "center",
+        }}>
+          <span style={{ fontSize: 26, fontWeight: 400, color: overallColors.text, lineHeight: 1 }}>
+            {results.overall_score}
+          </span>
+          <span style={{ fontSize: 10, color: overallColors.text, opacity: 0.6, marginTop: 2, fontFamily: "system-ui, sans-serif" }}>/100</span>
+        </div>
+        <div>
+          <h2 style={{ fontSize: 16, fontWeight: 500, color: "#111827", marginBottom: 8, fontFamily: "system-ui, sans-serif" }}>
+            Overall Perspective Score
+          </h2>
+          <p style={{ fontSize: 14, color: "#6B7280", fontFamily: "system-ui, sans-serif", lineHeight: 1.6 }}>
+            {results.overall_summary}
+          </p>
+        </div>
+      </div>
+
+      {/* Category cards */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {results.categories.map((cat) => (
+          <CategoryCard key={cat.name} cat={cat} />
+        ))}
+      </div>
+
+      {/* Try again */}
+      <button onClick={onReset} style={{
+        width: "100%", padding: "12px", fontSize: 14,
+        fontFamily: "system-ui, sans-serif", background: "transparent",
+        border: "0.5px solid #E5E7EB", borderRadius: 12,
+        cursor: "pointer", color: "#374151", marginTop: "1.5rem",
+        transition: "background 0.2s",
+      }}
+        onMouseOver={(e) => e.target.style.background = "#F9FAFB"}
+        onMouseOut={(e) => e.target.style.background = "transparent"}
+      >
+        Analyze another drawing
+      </button>
+    </div>
+  );
+}
+
+function CategoryCard({ cat }) {
+  const colors = getScoreColor(cat.score);
+  const scoreDisplay = cat.score !== null ? `${cat.score}/100` : "—";
+  const barWidth = cat.score !== null ? cat.score : 0;
+
+  return (
+    <div style={{
+      background: "white", border: "0.5px solid #E5E7EB",
+      borderRadius: 14, padding: "1rem 1.25rem",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <span style={{ fontSize: 14, fontWeight: 500, color: "#111827", fontFamily: "system-ui, sans-serif" }}>
+          {cat.name}
+        </span>
+        <span style={{
+          fontSize: 12, fontWeight: 500, fontFamily: "system-ui, sans-serif",
+          padding: "2px 10px", borderRadius: 20,
+          background: colors.badge, color: colors.text,
+        }}>
+          {scoreDisplay}
+        </span>
+      </div>
+
+      {/* Score bar */}
+      <div style={{ height: 3, background: "#F3F4F6", borderRadius: 2, marginBottom: 14 }}>
+        <div style={{
+          height: 3, borderRadius: 2, background: colors.bar,
+          width: `${barWidth}%`, transition: "width 0.8s ease",
+        }} />
+      </div>
+
+      {/* Observation */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+        <span style={{
+          fontSize: 10, fontWeight: 500, fontFamily: "monospace",
+          letterSpacing: "0.08em", textTransform: "uppercase",
+          color: "#9CA3AF", minWidth: 80, paddingTop: 2,
+        }}>Observation</span>
+        <span style={{ fontSize: 13, color: "#6B7280", fontFamily: "system-ui, sans-serif", lineHeight: 1.6 }}>
+          {cat.observation}
+        </span>
+      </div>
+
+      <div style={{ height: "0.5px", background: "#F3F4F6", margin: "8px 0" }} />
+
+      {/* Fix */}
+      <div style={{ display: "flex", gap: 10 }}>
+        <span style={{
+          fontSize: 10, fontWeight: 500, fontFamily: "monospace",
+          letterSpacing: "0.08em", textTransform: "uppercase",
+          color: "#9CA3AF", minWidth: 80, paddingTop: 2,
+        }}>Fix</span>
+        <span style={{ fontSize: 13, color: "#111827", fontFamily: "system-ui, sans-serif", lineHeight: 1.6 }}>
+          {cat.fix}
+        </span>
+      </div>
+    </div>
+  );
+}
