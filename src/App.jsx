@@ -261,7 +261,7 @@ export default function App() {
       const parsed = JSON.parse(clean);
       setResults(parsed);
       setStage("results");
-      await saveAndGenerateLink(parsed, base64);
+      saveAndGenerateLink(parsed, base64);
 
     } catch (err) {
       clearInterval(loadingRef.current);
