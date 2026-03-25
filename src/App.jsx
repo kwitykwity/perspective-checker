@@ -1,4 +1,10 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
 
 const PROMPT = `You are an expert art instructor specializing in perspective theory and technical drawing with 20+ years of experience teaching artists at all levels.
 
@@ -89,7 +95,7 @@ const LOADING_MESSAGES = [
 ];
 
 export default function App() {
-  const [stage, setStage] = useState("upload"); // upload | preview | loading | results
+  const [stage, setStage] = useState("upload");
   const [preview, setPreview] = useState(null);
   const [base64, setBase64] = useState(null);
   const [mediaType, setMediaType] = useState("image/jpeg");
@@ -97,8 +103,91 @@ export default function App() {
   const [error, setError] = useState(null);
   const [loadingMsg, setLoadingMsg] = useState(LOADING_MESSAGES[0]);
   const [dragOver, setDragOver] = useState(false);
+  const [shareUrl, setShareUrl] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [loadingShared, setLoadingShared] = useState(false);
   const fileInputRef = useRef(null);
   const loadingRef = useRef(null);
+
+  useEffect(() => {
+    const path = window.location.pathname;
+    const match = path.match(/\/result\/([a-f0-9-]+)/);
+    if (match) {
+      loadSharedResult(match[1]);
+    }
+  }, []);
+
+  const loadSharedResult = async (id) => {
+    setLoadingShared(true);
+    try {
+      const { data, error } = await supabase
+        .from("analyses")
+        .select("*")
+        .eq("id", id)
+        .single();
+      if (error) throw error;
+      if (data) {
+        setResults({
+          overall_score: data.overall_score,
+          inferred_skill_level: data.inferred_skill_level,
+          skill_inference_reasoning: data.skill_inference_reasoning,
+          overall_summary: data.overall_summary,
+          categories: data.categories,
+        });
+        if (data.image_url) setPreview(data.image_url);
+        setStage("results");
+        setShareUrl(window.location.href);
+      }
+    } catch (err) {
+      setError("Could not load shared result.");
+      setStage("upload");
+    }
+    setLoadingShared(false);
+  };
+
+  const saveAndGenerateLink = async (analysisResults, imageBase64) => {
+    try {
+      let imageUrl = null;
+      const fileName = `${Date.now()}.jpg`;
+      const byteCharacters = atob(imageBase64);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: "image/jpeg" });
+
+      const { data: uploadData } = await supabase.storage
+        .from("drawings")
+        .upload(fileName, blob, { contentType: "image/jpeg" });
+
+      if (uploadData) {
+        const { data: urlData } = supabase.storage
+          .from("drawings")
+          .getPublicUrl(fileName);
+        imageUrl = urlData?.publicUrl || null;
+      }
+
+      const { data, error } = await supabase
+        .from("analyses")
+        .insert({
+          overall_score: analysisResults.overall_score,
+          inferred_skill_level: analysisResults.inferred_skill_level,
+          skill_inference_reasoning: analysisResults.skill_inference_reasoning,
+          overall_summary: analysisResults.overall_summary,
+          categories: analysisResults.categories,
+          image_url: imageUrl,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      const url = `${window.location.origin}/result/${data.id}`;
+      setShareUrl(url);
+    } catch (err) {
+      console.error("Could not save result:", err);
+    }
+  };
 
   const handleFile = useCallback((file) => {
     setError(null);
@@ -130,6 +219,7 @@ export default function App() {
   const analyze = async () => {
     if (!base64) return;
     setError(null);
+    setShareUrl(null);
     setStage("loading");
 
     let idx = 0;
@@ -171,10 +261,20 @@ export default function App() {
       const parsed = JSON.parse(clean);
       setResults(parsed);
       setStage("results");
+      await saveAndGenerateLink(parsed, base64);
+
     } catch (err) {
       clearInterval(loadingRef.current);
       setError("Analysis failed — please try again. " + (err.message || ""));
       setStage("preview");
+    }
+  };
+
+  const copyLink = () => {
+    if (shareUrl) {
+      navigator.clipboard.writeText(shareUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
     }
   };
 
@@ -184,14 +284,27 @@ export default function App() {
     setBase64(null);
     setResults(null);
     setError(null);
+    setShareUrl(null);
+    setCopied(false);
+    window.history.pushState({}, "", "/");
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
+
+  if (loadingShared) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#FAFAF8", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ width: 32, height: 32, border: "2px solid #E5E7EB", borderTopColor: "#111827", borderRadius: "50%", animation: "spin 0.8s linear infinite", margin: "0 auto 12px" }} />
+          <p style={{ fontSize: 14, color: "#6B7280", fontFamily: "system-ui, sans-serif" }}>Loading shared result...</p>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight: "100vh", background: "#FAFAF8", fontFamily: "'Georgia', serif" }}>
       <div style={{ maxWidth: 680, margin: "0 auto", padding: "3rem 1.5rem 4rem" }}>
-
-        {/* Header */}
         <div style={{ textAlign: "center", marginBottom: "3rem" }}>
           <div style={{
             display: "inline-block", fontSize: 11, fontFamily: "monospace",
@@ -209,7 +322,6 @@ export default function App() {
           </p>
         </div>
 
-        {/* Upload Stage */}
         {stage === "upload" && (
           <>
             <div
@@ -238,7 +350,6 @@ export default function App() {
           </>
         )}
 
-        {/* Preview Stage */}
         {stage === "preview" && (
           <>
             <div style={{ borderRadius: 16, overflow: "hidden", border: "0.5px solid #E5E7EB", marginBottom: 16, position: "relative" }}>
@@ -256,7 +367,6 @@ export default function App() {
               fontFamily: "system-ui, sans-serif", fontWeight: 500,
               background: "#111827", color: "white", border: "none",
               borderRadius: 12, cursor: "pointer", letterSpacing: "0.01em",
-              transition: "opacity 0.2s",
             }}
               onMouseOver={(e) => e.target.style.opacity = "0.85"}
               onMouseOut={(e) => e.target.style.opacity = "1"}
@@ -266,7 +376,6 @@ export default function App() {
           </>
         )}
 
-        {/* Loading Stage */}
         {stage === "loading" && (
           <div style={{ textAlign: "center", padding: "5rem 1rem" }}>
             <div style={{
@@ -279,11 +388,16 @@ export default function App() {
           </div>
         )}
 
-        {/* Results Stage */}
         {stage === "results" && results && (
-          <Results results={results} onReset={reset} />
+          <Results
+            results={results}
+            preview={preview}
+            shareUrl={shareUrl}
+            copied={copied}
+            onCopy={copyLink}
+            onReset={reset}
+          />
         )}
-
       </div>
     </div>
   );
@@ -299,7 +413,7 @@ function ErrorMsg({ msg }) {
   );
 }
 
-function Results({ results, onReset }) {
+function Results({ results, preview, shareUrl, copied, onCopy, onReset }) {
   const overallColors = getScoreColor(results.overall_score);
   const skillColors = getSkillColors(results.inferred_skill_level);
   const skillLabel = results.inferred_skill_level
@@ -308,7 +422,6 @@ function Results({ results, onReset }) {
 
   return (
     <div>
-      {/* Skill badge */}
       <div style={{ marginBottom: 8 }}>
         <span style={{
           display: "inline-block", fontSize: 12, fontWeight: 500,
@@ -322,7 +435,6 @@ function Results({ results, onReset }) {
         {results.skill_inference_reasoning}
       </p>
 
-      {/* Overall score card */}
       <div style={{
         background: "white", border: "0.5px solid #E5E7EB",
         borderRadius: 16, padding: "1.5rem", marginBottom: "1rem",
@@ -348,20 +460,43 @@ function Results({ results, onReset }) {
         </div>
       </div>
 
-      {/* Category cards */}
+      {shareUrl && (
+        <div style={{
+          background: "#F0FDF4", border: "0.5px solid #A7F3D0",
+          borderRadius: 12, padding: "12px 16px", marginBottom: "1rem",
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        }}>
+          <div style={{ overflow: "hidden" }}>
+            <p style={{ fontSize: 12, fontWeight: 500, color: "#065F46", fontFamily: "system-ui, sans-serif", marginBottom: 2 }}>
+              Your result has a shareable link
+            </p>
+            <p style={{ fontSize: 11, color: "#6B7280", fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {shareUrl}
+            </p>
+          </div>
+          <button onClick={onCopy} style={{
+            flexShrink: 0, fontSize: 12, fontFamily: "system-ui, sans-serif",
+            padding: "6px 14px", background: copied ? "#065F46" : "white",
+            color: copied ? "white" : "#065F46",
+            border: "0.5px solid #A7F3D0", borderRadius: 20,
+            cursor: "pointer", transition: "all 0.2s", whiteSpace: "nowrap",
+          }}>
+            {copied ? "Copied!" : "Copy link"}
+          </button>
+        </div>
+      )}
+
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {results.categories.map((cat) => (
           <CategoryCard key={cat.name} cat={cat} />
         ))}
       </div>
 
-      {/* Try again */}
       <button onClick={onReset} style={{
         width: "100%", padding: "12px", fontSize: 14,
         fontFamily: "system-ui, sans-serif", background: "transparent",
         border: "0.5px solid #E5E7EB", borderRadius: 12,
         cursor: "pointer", color: "#374151", marginTop: "1.5rem",
-        transition: "background 0.2s",
       }}
         onMouseOver={(e) => e.target.style.background = "#F9FAFB"}
         onMouseOut={(e) => e.target.style.background = "transparent"}
@@ -394,39 +529,17 @@ function CategoryCard({ cat }) {
           {scoreDisplay}
         </span>
       </div>
-
-      {/* Score bar */}
       <div style={{ height: 3, background: "#F3F4F6", borderRadius: 2, marginBottom: 14 }}>
-        <div style={{
-          height: 3, borderRadius: 2, background: colors.bar,
-          width: `${barWidth}%`, transition: "width 0.8s ease",
-        }} />
+        <div style={{ height: 3, borderRadius: 2, background: colors.bar, width: `${barWidth}%` }} />
       </div>
-
-      {/* Observation */}
       <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
-        <span style={{
-          fontSize: 10, fontWeight: 500, fontFamily: "monospace",
-          letterSpacing: "0.08em", textTransform: "uppercase",
-          color: "#9CA3AF", minWidth: 80, paddingTop: 2,
-        }}>Observation</span>
-        <span style={{ fontSize: 13, color: "#6B7280", fontFamily: "system-ui, sans-serif", lineHeight: 1.6 }}>
-          {cat.observation}
-        </span>
+        <span style={{ fontSize: 10, fontWeight: 500, fontFamily: "monospace", letterSpacing: "0.08em", textTransform: "uppercase", color: "#9CA3AF", minWidth: 80, paddingTop: 2 }}>Observation</span>
+        <span style={{ fontSize: 13, color: "#6B7280", fontFamily: "system-ui, sans-serif", lineHeight: 1.6 }}>{cat.observation}</span>
       </div>
-
       <div style={{ height: "0.5px", background: "#F3F4F6", margin: "8px 0" }} />
-
-      {/* Fix */}
       <div style={{ display: "flex", gap: 10 }}>
-        <span style={{
-          fontSize: 10, fontWeight: 500, fontFamily: "monospace",
-          letterSpacing: "0.08em", textTransform: "uppercase",
-          color: "#9CA3AF", minWidth: 80, paddingTop: 2,
-        }}>Fix</span>
-        <span style={{ fontSize: 13, color: "#111827", fontFamily: "system-ui, sans-serif", lineHeight: 1.6 }}>
-          {cat.fix}
-        </span>
+        <span style={{ fontSize: 10, fontWeight: 500, fontFamily: "monospace", letterSpacing: "0.08em", textTransform: "uppercase", color: "#9CA3AF", minWidth: 80, paddingTop: 2 }}>Fix</span>
+        <span style={{ fontSize: 13, color: "#111827", fontFamily: "system-ui, sans-serif", lineHeight: 1.6 }}>{cat.fix}</span>
       </div>
     </div>
   );
